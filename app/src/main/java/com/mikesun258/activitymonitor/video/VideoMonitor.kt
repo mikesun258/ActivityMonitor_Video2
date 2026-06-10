@@ -12,9 +12,12 @@ class VideoMonitor : IXposedHookLoadPackage {
 
     // 目标应用包名
     private val targetPackages = listOf("com.kylin.read")
-    // 广播 Action 定义
-    private const val ACTION_SCROLL_STATE_CHANGE = "com.mikesun258.monitor.SCROLL_STATE"
-    private const val ACTION_ADAPTER_SET = "com.mikesun258.monitor.ADAPTER_SET"
+
+    // 广播 Action 定义（移到伴生对象中，解决 const 语法错误）
+    companion object {
+        private const val ACTION_SCROLL_STATE_CHANGE = "com.mikesun258.monitor.SCROLL_STATE"
+        private const val ACTION_ADAPTER_SET = "com.mikesun258.monitor.ADAPTER_SET"
+    }
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName !in targetPackages) return
