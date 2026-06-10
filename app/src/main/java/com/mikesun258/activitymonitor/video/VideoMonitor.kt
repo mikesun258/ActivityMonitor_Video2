@@ -1,135 +1,108 @@
-package com.mikesun258.activitymonitor.video
+package com.mikesun258.activitymonitor.video;
 
-import android.content.Intent
-import android.view.View
-import androidx.recyclerview.widget.RecyclerView
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import android.content.Context;
+import android.content.Intent;
+import androidx.recyclerview.widget.RecyclerView;
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-class VideoMonitor : IXposedHookLoadPackage {
+public class VideoMonitor implements IXposedHookLoadPackage {
+    // 广播Action常量，需和MacroDroid内配置完全一致
+    private static final String ACTION_VIDEO_SCROLL = "com.mikesun258.activitymonitor.video.EVENT_SCROLL";
+    private static final String EXTRA_DIRECTION = "direction";
+    private static final String EXTRA_TIMESTAMP = "timestamp";
+    // 全局日志前缀标识
+    private static final String LOG_TAG = "【$$$】";
 
-    // 目标应用包名
-    private val targetPackages = listOf("com.kylin.read")
-
-    // 广播 Action 定义（移到伴生对象中，解决 const 语法错误）
-    companion object {
-        private const val ACTION_SCROLL_STATE_CHANGE = "com.mikesun258.monitor.SCROLL_STATE"
-        private const val ACTION_ADAPTER_SET = "com.mikesun258.monitor.ADAPTER_SET"
-    }
-
-    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        if (lpparam.packageName !in targetPackages) return
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
+        // 仅作用于目标包名
+        if (!"com.kylin.read".equals(lpparam.packageName)) {
+            return;
+        }
+        XposedBridge.log(LOG_TAG + "目标应用进程已加载，进入handleLoadPackage | 包名：" + lpparam.packageName);
 
         try {
-            hookRecyclerViewScroll(lpparam)
-            hookRecyclerViewAdapter(lpparam)
-        } catch (e: Throwable) {
-            // 捕获顶层异常，防止模块加载失败
+            // 查找RecyclerView类
+            Class<?> recyclerViewClass = XposedHelpers.findClass(
+                    "androidx.recyclerview.widget.RecyclerView",
+                    lpparam.classLoader
+            );
+            XposedBridge.log(LOG_TAG + "RecyclerView类加载成功");
+            // 挂载滚动Hook
+            hookRecyclerViewOnScrolled(recyclerViewClass);
+            // 挂载控件创建监听Hook
+            hookRecyclerViewAttach(recyclerViewClass);
+        } catch (Throwable e) {
+            XposedBridge.log(LOG_TAG + "模块初始化整体异常 | 异常信息：" + e.getMessage());
+            XposedBridge.log(LOG_TAG + "异常堆栈：" + XposedBridge.getStackTraceString(e));
         }
     }
 
-    /**
-     * 监听 RecyclerView 滚动状态
-     * 兼容 androidx / support.v7 两种 RecyclerView
-     */
-    private fun hookRecyclerViewScroll(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val rvClassList = mutableListOf<Class<*>>()
+    /** Hook RecyclerView滚动回调 onScrolled */
+    private void hookRecyclerViewOnScrolled(Class<?> recyclerViewClass) {
+        XposedBridge.log(LOG_TAG + "开始执行 RecyclerView onScrolled 方法Hook");
+        try {
+            XposedHelpers.findAndHookMethod(recyclerViewClass, "onScrolled", int.class, int.class, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    int dx = (int) param.args[0];
+                    int dy = (int) param.args[1];
+                    XposedBridge.log(LOG_TAG + "onScrolled触发 | dx=" + dx + " dy=" + dy);
 
-        // 加载 androidx RecyclerView
-        runCatching {
-            XposedHelpers.findClass("androidx.recyclerview.widget.RecyclerView", lpparam.classLoader)
-        }.onSuccess { rvClassList.add(it) }
-
-        // 加载 旧版 support.v7 RecyclerView
-        runCatching {
-            XposedHelpers.findClass("android.support.v7.widget.RecyclerView", lpparam.classLoader)
-        }.onSuccess { rvClassList.add(it) }
-
-        rvClassList.forEach { rvCls ->
-            XposedHelpers.findAndHookMethod(
-                rvCls,
-                "addOnScrollListener",
-                RecyclerView.OnScrollListener::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try {
-                            // 安全类型转换，过滤非法调用
-                            val rv = param.thisObject as? RecyclerView ?: return
-                            val originListener = param.args[0] as? RecyclerView.OnScrollListener ?: return
-
-                            // 包装原有监听器，拦截滚动状态回调
-                            val wrapListener = object : RecyclerView.OnScrollListener() {
-                                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
-                                    super.onScrollStateChanged(recyclerView, newState)
-                                    // 发送滚动状态广播
-                                    sendScrollBroadcast(recyclerView.context, newState)
-                                }
-
-                                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                                    super.onScrolled(recyclerView, dx, dy)
-                                }
-                            }
-
-                            // 移除原监听，替换为包装监听（避免重复监听）
-                            rv.removeOnScrollListener(originListener)
-                            rv.addOnScrollListener(wrapListener)
-
-                        } catch (_: Throwable) {
-                            // 静默异常，不影响宿主
-                        }
+                    // 过滤微小抖动滚动
+                    if (Math.abs(dy) < 5) {
+                        return;
                     }
+                    String direction = dy > 0 ? "down" : "up";
+                    XposedBridge.log(LOG_TAG + "有效滑动判定 | 方向：" + direction);
+
+                    RecyclerView rv = (RecyclerView) param.thisObject;
+                    Context ctx = rv.getContext();
+                    sendScrollBroadcast(ctx, direction);
                 }
-            )
+            });
+            XposedBridge.log(LOG_TAG + "RecyclerView onScrolled Hook 挂载完成");
+        } catch (Throwable e) {
+            XposedBridge.log(LOG_TAG + "Hook onScrolled失败 | 原因：" + e.getMessage());
         }
     }
 
-    /**
-     * 监听 setAdapter 动作
-     */
-    private fun hookRecyclerViewAdapter(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val rvClassList = mutableListOf<Class<*>>()
-
-        runCatching {
-            XposedHelpers.findClass("androidx.recyclerview.widget.RecyclerView", lpparam.classLoader)
-        }.onSuccess { rvClassList.add(it) }
-
-        runCatching {
-            XposedHelpers.findClass("android.support.v7.widget.RecyclerView", lpparam.classLoader)
-        }.onSuccess { rvClassList.add(it) }
-
-        rvClassList.forEach { rvCls ->
-            XposedHelpers.findAndHookMethod(
-                rvCls,
-                "setAdapter",
-                RecyclerView.Adapter::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try {
-                            val rv = param.thisObject as? RecyclerView ?: return
-                            val adapter = param.args[0] as? RecyclerView.Adapter<*> ?: return
-
-                            // 发送 Adapter 变更广播
-                            val intent = Intent(ACTION_ADAPTER_SET)
-                            intent.putExtra("hasAdapter", adapter != null)
-                            rv.context.sendBroadcast(intent)
-
-                        } catch (_: Throwable) {
-                        }
-                    }
+    /** Hook RecyclerView挂载到窗口回调，确认控件是否被创建 */
+    private void hookRecyclerViewAttach(Class<?> recyclerViewClass) {
+        XposedBridge.log(LOG_TAG + "开始执行 RecyclerView onAttachedToWindow 方法Hook");
+        try {
+            XposedHelpers.findAndHookMethod(recyclerViewClass, "onAttachedToWindow", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    RecyclerView rv = (RecyclerView) param.thisObject;
+                    XposedBridge.log(LOG_TAG + "RecyclerView实例创建完成 | 全类名：" + rv.getClass().getName());
                 }
-            )
+            });
+            XposedBridge.log(LOG_TAG + "RecyclerView onAttachedToWindow Hook 挂载完成");
+        } catch (Throwable e) {
+            XposedBridge.log(LOG_TAG + "Hook onAttachedToWindow失败 | 原因：" + e.getMessage());
         }
     }
 
-    /**
-     * 发送滚动状态广播
-     * @param state 0:停止滚动 1:手指拖拽 2:惯性滚动
-     */
-    private fun sendScrollBroadcast(context: android.content.Context, state: Int) {
-        val intent = Intent(ACTION_SCROLL_STATE_CHANGE)
-        intent.putExtra("scroll_state", state)
-        context.sendBroadcast(intent)
+    /** 发送滑动广播至MacroDroid */
+    private void sendScrollBroadcast(Context context, String direction) {
+        if (context == null) {
+            XposedBridge.log(LOG_TAG + "发送广播失败：Context为空");
+            return;
+        }
+        try {
+            Intent intent = new Intent(ACTION_VIDEO_SCROLL);
+            intent.putExtra(EXTRA_DIRECTION, direction);
+            intent.putExtra(EXTRA_TIMESTAMP, System.currentTimeMillis());
+            intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+            context.sendBroadcast(intent);
+            XposedBridge.log(LOG_TAG + "广播发送成功 | Action=" + ACTION_VIDEO_SCROLL + " 滑动方向=" + direction);
+        } catch (Throwable e) {
+            XposedBridge.log(LOG_TAG + "广播发送异常 | 异常信息：" + e.getMessage());
+        }
     }
 }
