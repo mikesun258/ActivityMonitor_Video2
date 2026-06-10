@@ -12,6 +12,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 class VideoMonitor : IXposedHookLoadPackage {
     private val TAG = "VideoMonitor"
     private val BROADCAST_VIDEO_SWITCH = "com.mikesun258.activitymonitor.VIDEO_SWITCH"
+    // 颜色码 + 自定义前缀
+    private val RED = "\u001B[31m"
+    private val RESET = "\u001B[0m"
+    private val LOG_PREFIX = "【我要的】"
 
     private val targetPackages = listOf(
         "com.bytedance.douyin",
@@ -31,6 +35,7 @@ class VideoMonitor : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName in targetPackages) {
             hookRecyclerView(lpparam)
+            XposedBridge.log("${RED}${LOG_PREFIX}[${TAG}] 已挂载: ${lpparam.packageName}${RESET}")
         }
     }
 
@@ -62,6 +67,7 @@ class VideoMonitor : IXposedHookLoadPackage {
                                 if (firstIdle || lastPos != -1) {
                                     firstIdle = false
                                     sendBroadcast(recyclerView, lastPos)
+                                    XposedBridge.log("${RED}${LOG_PREFIX}[${TAG}] 视频切换 -> 位置: $lastPos${RESET}")
                                 }
                             }
                             originListener?.onScrollStateChanged(recyclerView, newState)
@@ -71,7 +77,8 @@ class VideoMonitor : IXposedHookLoadPackage {
                 }
             })
         } catch (e: Throwable) {
-            Log.e(TAG, "RV Hook Error", e)
+            Log.e(TAG, "${RED}${LOG_PREFIX}RV Hook Error${RESET}", e)
+            XposedBridge.log("${RED}${LOG_PREFIX}[${TAG}] 挂载异常: ${e.message}${RESET}")
         }
     }
 
