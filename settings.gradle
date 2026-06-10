@@ -1,0 +1,32 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+        maven { url 'https://maven.aliyun.com/repository/jcenter' }
+        maven { url 'https://mirrors.tuna.tsinghua.edu.cn/google' }
+        maven { url 'https://mirrors.tuna.tsinghua.edu.cn/maven-central' }
+        maven { url 'https://mirrors.tuna.tsinghua.edu.cn/jcenter' }
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        jcenter()
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+        maven { url 'https://maven.aliyun.com/repository/jcenter' }
+        maven { url 'https://mirrors.tuna.tsinghua.edu.cn/google' }
+        maven { url 'https://mirrors.tuna.tsinghua.edu.cn/maven-central' }
+        maven { url 'https://mirrors.tuna.tsinghua.edu.cn/jcenter' }
+    }
+}
+
+rootProject.name = "ActivityMonitor_Activity"
+include ':app'
+
