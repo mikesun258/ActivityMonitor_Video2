@@ -27,6 +27,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "ActivityMonitor_Activity"
+rootProject.name = "ActivityMonitor_Video"
 include ':app'
-
