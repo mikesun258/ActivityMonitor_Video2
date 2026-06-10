@@ -2,7 +2,7 @@ package com.mikesun258.activitymonitor.video;
 
 import android.content.Context;
 import android.content.Intent;
-import androidx.recyclerview.widget.RecyclerView;
+import android.view.View;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -26,7 +26,7 @@ public class VideoMonitor implements IXposedHookLoadPackage {
         XposedBridge.log(LOG_TAG + "目标应用进程已加载，进入handleLoadPackage | 包名：" + lpparam.packageName);
 
         try {
-            // 查找RecyclerView类
+            // 查找RecyclerView类（通过类名动态加载，不依赖编译期导入）
             Class<?> recyclerViewClass = XposedHelpers.findClass(
                     "androidx.recyclerview.widget.RecyclerView",
                     lpparam.classLoader
@@ -60,8 +60,9 @@ public class VideoMonitor implements IXposedHookLoadPackage {
                     String direction = dy > 0 ? "down" : "up";
                     XposedBridge.log(LOG_TAG + "有效滑动判定 | 方向：" + direction);
 
-                    RecyclerView rv = (RecyclerView) param.thisObject;
-                    Context ctx = rv.getContext();
+                    // 动态获取Context，避免编译期类型依赖
+                    Object recyclerViewObj = param.thisObject;
+                    Context ctx = (Context) XposedHelpers.callMethod(recyclerViewObj, "getContext");
                     sendScrollBroadcast(ctx, direction);
                 }
             });
@@ -78,8 +79,9 @@ public class VideoMonitor implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(recyclerViewClass, "onAttachedToWindow", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    RecyclerView rv = (RecyclerView) param.thisObject;
-                    XposedBridge.log(LOG_TAG + "RecyclerView实例创建完成 | 全类名：" + rv.getClass().getName());
+                    Object recyclerViewObj = param.thisObject;
+                    String className = recyclerViewObj.getClass().getName();
+                    XposedBridge.log(LOG_TAG + "RecyclerView实例创建完成 | 全类名：" + className);
                 }
             });
             XposedBridge.log(LOG_TAG + "RecyclerView onAttachedToWindow Hook 挂载完成");
