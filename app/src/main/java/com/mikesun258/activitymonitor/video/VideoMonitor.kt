@@ -5,7 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
-import android.view.ViewTreeObserver
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -18,14 +18,15 @@ import java.util.concurrent.atomic.AtomicLong
 
 class VideoMonitor : IXposedHookLoadPackage {
     private val TAG = "VideoMonitor"
-    // 沿用你原有广播Action，MD直接接收这个Action即可
+    // MD接收的广播Action
     private val BROADCAST_VIDEO_SWITCH = "com.mikesun258.activitymonitor.VIDEO_SWITCH"
-    // 防抖冷却间隔 3000ms，避免短时间多次发送广播
+    // 防抖冷却 3秒
     private val COOL_DOWN_MS = 3000L
     private val lastSendTime = AtomicLong(0)
-    private val mainHandler = Handler(Looper.getMainLooper())
+    // 修复NPE核心：延迟初始化Handler，不在类构造阶段实例化
+    private lateinit var mainHandler: Handler
 
-    // 原有短视频包 + 新增番茄小说com.dragon.read
+    // 目标监控APP包名列表
     private val targetPackages = listOf(
         "com.bytedance.douyin",
         "com.bytedance.douyin.lite",
@@ -39,23 +40,28 @@ class VideoMonitor : IXposedHookLoadPackage {
         "com.kuaishou.nebula",
         "com.huolong.mangju",
         "com.kylin.read",
-        "com.dragon.read" // 番茄小说（你的目标APP）
+        "com.dragon.read"
     )
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         val pkg = lpparam.packageName
         if (pkg !in targetPackages) return
 
-        // 原有逻辑：所有目标包都保留RecyclerView滑动切视频监听（抖音/快手/列表式短剧）
+        // 进程加载后再初始化主线程Handler，此时主线程Looper已就绪，彻底解决空指针崩溃
+        if (!::mainHandler.isInitialized) {
+            mainHandler = Handler(Looper.getMainLooper())
+        }
+
+        // 通用RecyclerView上下滑动切视频监听（全目标APP生效）
         hookRecyclerView(lpparam)
 
-        // 番茄小说专属：监听布局树变化，识别【下一集自动加载完成】触发广播
+        // 番茄小说专属：监控布局新增ImageView，捕获自动下一集切换事件
         if (pkg == "com.dragon.read") {
             hookDragonReadLayoutWatch(lpparam)
         }
     }
 
-    // 原有RecyclerView滑动监听（上下滑动切视频触发广播，完全保留不动）
+    // RecyclerView滚动监听 完整逻辑
     private fun hookRecyclerView(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val rvClass = lpparam.classLoader.loadClass("androidx.recyclerview.widget.RecyclerView")
@@ -64,100 +70,102 @@ class VideoMonitor : IXposedHookLoadPackage {
                     val originListener = param.args[0] as RecyclerView.OnScrollListener?
                     val recyclerView = param.thisObject as RecyclerView
 
-                    val newListener = object : RecyclerView.OnScrollListener() {
-                        private var lastPos = -1
-                        private var firstIdle = true
+                    val wrapScrollListener = object : RecyclerView.OnScrollListener() {
+                        private var lastVisiblePos = -1
+                        private var firstIdleFlag = true
 
                         override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                             super.onScrolled(recyclerView, dx, dy)
-                            val lm = recyclerView.layoutManager
-                            if (lm is LinearLayoutManager) {
-                                lastPos = lm.findFirstCompletelyVisibleItemPosition()
+                            val layoutManager = recyclerView.layoutManager
+                            if (layoutManager is LinearLayoutManager) {
+                                lastVisiblePos = layoutManager.findFirstCompletelyVisibleItemPosition()
                             }
                             originListener?.onScrolled(recyclerView, dx, dy)
                         }
 
                         override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
                             super.onScrollStateChanged(recyclerView, newState)
+                            // 滚动停止时触发广播
                             if (newState == RecyclerView.SCROLL_STATE_IDLE) {
-                                if (firstIdle || lastPos != -1) {
-                                    firstIdle = false
+                                if (firstIdleFlag || lastVisiblePos != -1) {
+                                    firstIdleFlag = false
                                     sendBroadcast(
                                         view = recyclerView,
-                                        position = lastPos,
-                                        triggerType = "scroll_switch" // 滑动切换视频标记
+                                        position = lastVisiblePos,
+                                        triggerType = "scroll_switch"
                                     )
                                 }
                             }
                             originListener?.onScrollStateChanged(recyclerView, newState)
                         }
                     }
-                    recyclerView.addOnScrollListener(newListener)
+                    recyclerView.addOnScrollListener(wrapScrollListener)
                 }
             })
         } catch (e: Throwable) {
-            Log.e(TAG, "RV Hook Error", e)
+            Log.e(TAG, "RecyclerView Hook Failed", e)
+            XposedBridge.log("$TAG RV Hook Err: ${e.message}")
         }
     }
 
-    /**
-     * 番茄小说专属：监听全局View树，短剧播放页下一集ImageView新增时触发（一集播完自动切下一集）
-     * 原理：你截图里视频载体是多层FrameLayout包裹的ImageView，新一集加载时会新增ImageView节点
-     */
+    // 番茄小说 布局树监听 完整补全版
     private fun hookDragonReadLayoutWatch(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            // Hook ViewGroup添加View，监控全局布局新增View
             val viewGroupCls = lpparam.classLoader.loadClass("android.view.ViewGroup")
             XposedBridge.hookAllMethods(viewGroupCls, "addView", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val parentView = param.thisObject as View
-                    val addChild = param.args[0] as View
+                    val childView = param.args[0] as View
 
-                    // 条件1：新增的是ImageView（短剧视频画面载体）
-                    if (addChild !is ImageView) return
-                    // 条件2：父布局是多层FrameLayout嵌套（匹配你截图的层级结构）
-                    var tmpParent: View? = parentView
-                    var frameLayerCount = 0
-                    repeat(8) { // 最多向上遍历8层父布局（匹配你截图里多层FrameLayout嵌套）
-                        tmpParent = tmpParent?.parent as? View
-                        if (tmpParent is FrameLayout) frameLayerCount++
+                    // 仅拦截新增ImageView（短剧视频画面载体）
+                    if (childView !is ImageView) return
+
+                    // 向上遍历父布局，统计FrameLayout嵌套层数
+                    var currentParent: View? = parentView
+                    var frameLayoutCount = 0
+                    repeat(8) {
+                        currentParent = currentParent?.parent as? View
+                        if (currentParent is FrameLayout) frameLayoutCount++
                     }
-                    // 层级>=4层FrameLayout = 判定为短剧视频容器的ImageView = 新一集开始播放
-                    if (frameLayerCount >= 4) {
+
+                    // 嵌套FrameLayout≥4层 判定为新一集视频加载完成
+                    if (frameLayoutCount >= 4) {
                         sendBroadcast(
-                            view = parentView,
-                            position = -2, // -2代表番茄自动切下一集
-                            triggerType = "auto_next_episode" // 自动下一集标记
+                            view = childView,
+                            position = -1,
+                            triggerType = "auto_next_episode"
                         )
                     }
                 }
             })
         } catch (e: Throwable) {
-            Log.e(TAG, "DragonRead Layout Watch Hook Err", e)
+            Log.e(TAG, "DragonRead Layout Hook Failed", e)
+            XposedBridge.log("$TAG DragonRead Hook Err: ${e.message}")
         }
     }
 
     /**
-     * 统一发送广播方法，新增防抖+携带触发类型
-     * @param triggerType scroll_switch=手动滑动切视频  auto_next_episode=番茄自动播放下一集
+     * 发送全局广播核心方法（带防抖，防止频繁触发）
+     * @param view 触发源View
+     * @param position RV当前可见位置
+     * @param triggerType 触发类型 scroll_switch / auto_next_episode
      */
     private fun sendBroadcast(view: View, position: Int, triggerType: String) {
         val now = System.currentTimeMillis()
-        // 防抖冷却判断，短时间重复触发直接拦截
+        // 防抖拦截：冷却时间内直接返回
         if (now - lastSendTime.get() < COOL_DOWN_MS) return
         lastSendTime.set(now)
 
+        // 切到主线程发送广播（子线程发送广播存在稳定性问题）
         mainHandler.post {
             val intent = Intent(BROADCAST_VIDEO_SWITCH).apply {
                 putExtra("pkg_name", view.context.packageName)
-                putExtra("video_position", position)
-                putExtra("view_id", view.id)
-                putExtra("trigger_type", triggerType) // 区分是滑动还是自动下一集
+                putExtra("item_pos", position)
+                putExtra("trigger_type", triggerType)
                 addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
-                setPackage("com.arlosoft.macrodroid") // 定向只发给MacroDroid，避免系统广播泛滥
             }
             view.context.sendBroadcast(intent)
-            Log.d(TAG, "发送视频切换广播 | pkg:${view.context.packageName} pos:$position type:$triggerType")
+            XposedBridge.log("$TAG Send Switch Broadcast | pkg:${view.context.packageName} type:$triggerType pos:$position")
         }
     }
 }
