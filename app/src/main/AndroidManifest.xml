@@ -1,24 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.mikesun258.activitymonitor.video">
+<!-- 已完全删除根节点过时package属性，全部交由gradle的namespace管控，解决你之前manifest警告 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="ActivityMonitor_Video"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.Light">
 
+        <!-- Xposed 标准模块元数据（兼容EdXposed/LSPosed全版本） -->
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="短视频滑动监听模块" />
+            android:value="短视频/短剧RecyclerView滑动监听，下滑切集发送系统广播com.mikesun258.activitymonitor.VIDEO_SWITCH，供MacroDroid接收自动执行点击" />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />
+        <!-- 新增LSPosed专属标识，模块会出现在LSPosed模块列表 -->
+        <meta-data
+            android:name="lsposedmodule"
+            android:value="true" />
 
     </application>
 
