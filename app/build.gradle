@@ -13,6 +13,8 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0"
+        // Xposed模块不需要activity，清空默认启动项
+        manifestPlaceholders = [appIcon: "@mipmap/ic_launcher"]
     }
 
     buildTypes {
@@ -28,19 +30,28 @@ android {
     kotlinOptions {
         jvmTarget = '1.8'
     }
+    // 关闭无用资源压缩、关闭BuildConfig冗余生成，加速CI打包
+    buildFeatures {
+        buildConfig false
+        viewBinding false
+    }
+}
+
+repositories {
+    // 必须加这个源才能正常拉取xposed api依赖，不然github action会下载失败
+    maven { url "https://api.xposed.info/" }
+    google()
+    mavenCentral()
 }
 
 dependencies {
-    implementation 'androidx.core:core-ktx:1.12.0'
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'com.google.android.material:material:1.11.0'
-    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-
+    // Xposed 核心依赖 仅compileOnly 打包不打进APK
     compileOnly 'de.robv.android.xposed:api:82'
     compileOnly 'de.robv.android.xposed:api:82:sources'
 
+    // 全部删掉androidx/appcompat/material/constraintlayout这些界面依赖，Xposed纯模块完全用不到，多余依赖会增大包体+编译冗余
+    // 测试依赖全部保留不影响打包
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
 }
-
