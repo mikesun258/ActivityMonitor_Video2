@@ -3,33 +3,30 @@ package com.mikesun258.activitymonitor.video
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.View
-import android.view.ViewGroup
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.TextView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 class VideoMonitor : IXposedHookLoadPackage {
     private val TAG = "VideoMonitor"
+    // 对外广播Action，MD固定监听这个Action即可
     val BROADCAST_VIDEO_SWITCH = "com.mikesun258.activitymonitor.VIDEO_SWITCH"
+    // 广播防抖冷却3秒
     private val COOL_DOWN_MS = 3000L
     private val lastSendTime = AtomicLong(0)
     private lateinit var mainHandler: Handler
-    // 已完成Hook的RV实例集合，防止重复添加监听
+    // 防止同一个RecyclerView重复添加监听
     private val hookedRvSet = ConcurrentHashMap.newKeySet<RecyclerView>()
-    // 存储每个RV上次滑动方向
+    // 存储每个RV上次滚动dy值，区分上下滑
     private val rvLastDyMap = ConcurrentHashMap<RecyclerView, Int>()
 
+    // 全部目标短剧App包名列表
     private val targetPackages = listOf(
         "com.bytedance.douyin",
         "com.bytedance.douyin.lite",
@@ -49,91 +46,97 @@ class VideoMonitor : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         val pkgName = lpparam.packageName
         if (pkgName !in targetPackages) return
-        XposedBridge.log("$TAG 开始Hook目标包:$pkgName")
+        XposedBridge.log("[$TAG] 进入目标APP: $pkgName")
         if (!::mainHandler.isInitialized) mainHandler = Handler(Looper.getMainLooper())
-        hookRvSetLayoutManager(lpparam)
+        hookRecyclerViewSetLayoutManager(lpparam)
     }
 
-    // 最优入口：Hook setLayoutManager，精准捕获瀑布流RV
-    private fun hookRvSetLayoutManager(lpparam: XC_LoadPackage.LoadPackageParam) {
+    /**
+     * 最优Hook入口：Hook RecyclerView.setLayoutManager 只捕获ViewPager内嵌的垂直瀑布流RV
+     * 彻底解决之前findAndHookMethod编译报错，全程只用Xposed原生API，无任何编译异常
+     */
+    private fun hookRecyclerViewSetLayoutManager(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            val rvCls = XposedHelpers.findAndHookMethod(
-                RecyclerView::class.java,
-                lpparam.classLoader,
-                "setLayoutManager",
-                androidx.recyclerview.widget.RecyclerView.LayoutManager::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val rv = param.thisObject as RecyclerView
-                        if (hookedRvSet.contains(rv)) return
-                        val lm = param.args[0] as? LinearLayoutManager ?: return
-                        // 只过滤垂直线性布局
-                        if (lm.orientation != LinearLayoutManager.VERTICAL) return
-                        // 核心：判断是否嵌套在ViewPager/ViewPager2内（番茄短剧容器）
-                        if (!isInAnyViewPager(rv)) return
+            val rvCls = lpparam.classLoader.loadClass("androidx.recyclerview.widget.RecyclerView")
+            XposedBridge.hookAllMethods(rvCls, "setLayoutManager", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val rv = param.thisObject as RecyclerView
+                    // 已Hook过直接跳过
+                    if (hookedRvSet.contains(rv)) return
+                    val layoutManager = param.args[0] ?: return
+                    // 只捕获垂直LinearLayoutManager，横向标签RV/评论RV全部过滤
+                    if (layoutManager !is LinearLayoutManager || layoutManager.orientation != LinearLayoutManager.VERTICAL) return
+                    // 只保留ViewPager(番茄老式) / ViewPager2(抖音快手) 内部的RV，首页列表全部过滤
+                    if (!isRecyclerViewInsideAnyViewPager(rv)) return
 
-                        XposedBridge.log("$TAG 捕获短剧瀑布流RV:$rv")
-                        hookedRvSet.add(rv)
-                        rvLastDyMap[rv] = 0
+                    hookedRvSet.add(rv)
+                    rvLastDyMap[rv] = 0
+                    XposedBridge.log("[$TAG] 成功绑定短剧瀑布流RV实例:$rv")
 
-                        // 添加专属滚动监听
-                        rv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                                rvLastDyMap[recyclerView] = dy
-                            }
+                    // 绑定滚动监听
+                    rv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                        override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                            rvLastDyMap[recyclerView] = dy
+                        }
 
-                            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
-                                if (newState != RecyclerView.SCROLL_STATE_IDLE) return
-                                val dy = rvLastDyMap[recyclerView] ?: 0
-                                // 只向下滑动才触发切集广播
-                                if (dy <= 0) return
-                                val llm = recyclerView.layoutManager as LinearLayoutManager
-                                val currPos = llm.findFirstVisibleItemPosition()
-                                // 延迟200ms等待item完全渲染完毕
-                                mainHandler.postDelayed({
-                                    sendSwitchBroadcast(recyclerView, currPos, "scroll_switch")
-                                }, 200)
-                            }
-                        })
-                    }
+                        override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                            // 仅滚动静止时触发
+                            if (newState != RecyclerView.SCROLL_STATE_IDLE) return
+                            val scrollDy = rvLastDyMap[recyclerView] ?: 0
+                            // dy>0=手指向下滑=切下一集；dy<=0上滑回看不发广播
+                            if (scrollDy <= 0) return
+                            val lm = recyclerView.layoutManager as LinearLayoutManager
+                            val visiblePos = lm.findFirstVisibleItemPosition()
+                            // 延迟200ms等待item完全渲染完成再发广播
+                            mainHandler.postDelayed({
+                                sendVideoSwitchBroadcast(recyclerView, visiblePos, "scroll_switch")
+                            }, 200)
+                        }
+                    })
                 }
-            )
+            })
         } catch (e: Throwable) {
-            XposedBridge.log("$TAG hookRvSetLayoutManager异常:${e.stackTraceToString()}")
+            XposedBridge.log("[$TAG] RV Hook异常:${e.stackTraceToString()}")
         }
     }
 
-    // 兼容两种ViewPager 老式androidx.viewpager.widget + 新版ViewPager2
-    private fun isInAnyViewPager(rv: RecyclerView): Boolean {
-        var parent: View? = rv.parent as View
-        var depth = 0
-        while (parent != null && depth < 12) {
-            val clsName = parent.javaClass.name
+    /**
+     * 遍历父布局，同时兼容 androidx.viewpager.widget.ViewPager(番茄com.kylin.read) 和 ViewPager2(抖音快手)
+     */
+    private fun isRecyclerViewInsideAnyViewPager(rv: RecyclerView): Boolean {
+        var parentView: View? = rv.parent as View
+        var traverseDepth = 0
+        // 最多向上遍历12层父布局，防止死循环
+        while (parentView != null && traverseDepth < 12) {
+            val clsName = parentView.javaClass.name
             if (clsName.startsWith("androidx.viewpager.widget.ViewPager")
                 || clsName.startsWith("androidx.viewpager2.widget.ViewPager2")
             ) {
                 return true
             }
-            parent = parent.parent as? View
-            depth++
+            parentView = parentView.parent as? View
+            traverseDepth++
         }
         return false
     }
 
-    // 防抖发送广播
-    fun sendSwitchBroadcast(view: View, pos: Int, triggerType: String) {
-        val now = System.currentTimeMillis()
-        if (now - lastSendTime.get() < COOL_DOWN_MS) return
-        lastSendTime.set(now)
+    /**
+     * 发送全局广播，附带包名、item位置、触发类型，MD接收后区分不同APP做不同点击逻辑
+     */
+    private fun sendVideoSwitchBroadcast(view: View, pos: Int, triggerType: String) {
+        val nowTs = System.currentTimeMillis()
+        if (nowTs - lastSendTime.get() < COOL_DOWN_MS) return
+        lastSendTime.set(nowTs)
+
         mainHandler.post {
             val intent = Intent(BROADCAST_VIDEO_SWITCH).apply {
                 putExtra("pkg_name", view.context.packageName)
                 putExtra("item_pos", pos)
                 putExtra("trigger_type", triggerType)
-                addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+                flags = Intent.FLAG_INCLUDE_STOPPED_PACKAGES
             }
             view.context.sendBroadcast(intent)
-            XposedBridge.log("$TAG 发送切集广播 pkg:${view.context.packageName} pos:$pos type:$triggerType")
+            XposedBridge.log("[$TAG] 已发送切集广播 | 包名:${view.context.packageName} 条目位置:$pos 触发:$triggerType")
         }
     }
 }
